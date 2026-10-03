@@ -28,7 +28,10 @@ For each file:
 3. **Topic.** The same call returns a topic, `math`, `nonfic` or `other`,
    which picks the collection.
 
-An item whose title already exists in the library is not added again.
+If the library already has an item with the same title, volume and (when
+both are known) year, the file is still imported, with an extra tag
+`possible-duplicate`; Zotero's *Duplicate Items* view merges the two if they
+really are the same.
 
 Cost: one model call per file without a usable DOI, typically $0.04–0.07.
 
@@ -36,8 +39,7 @@ Cost: one model call per file without a usable DOI, typically $0.04–0.07.
 
 | outcome | file moves to | Zotero |
 |---|---|---|
-| imported | `to-zotero/processed/` | new item + attachment |
-| title already in library | `to-zotero/duplicates/` | unchanged |
+| imported | `to-zotero/processed/` | new item + attachment (+ `possible-duplicate` tag) |
 | error | `to-zotero/failed/` | unchanged |
 
 Every run is logged to `~/Library/Logs/zotero-autoimport.log`.
@@ -82,6 +84,7 @@ time, so pass it to `install.sh` instead.
 | `ZAI_COLLECTION_OTHER` | `Inbox other` | collection for topic `other` |
 | `ZAI_COLLECTION_FALLBACK` | `Inbox` | used if the topic's collection does not exist |
 | `ZAI_TAG` | `auto-import` | tag put on every imported item |
+| `ZAI_DUP_TAG` | `possible-duplicate` | extra tag when a likely twin exists |
 | `ZAI_MODEL` | `haiku` | model passed to `claude -p --model` |
 | `ZAI_CROSSREF_MAILTO` | empty | your e-mail for Crossref's polite pool |
 
@@ -104,7 +107,8 @@ are not a documented public API and may change between Zotero versions.
 - Model output can be wrong in details: swapped first and last names, year of
   the original instead of the translation. The `auto-import` tag is there for
   a quick review.
-- Duplicate detection compares titles only.
+- Duplicate detection compares title, volume and year only; a DOI or ISBN
+  match under a different title goes unnoticed.
 
 ## License
 
