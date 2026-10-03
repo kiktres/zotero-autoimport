@@ -2,10 +2,11 @@
 """Drop-folder importer for Zotero.
 
 Every PDF / DjVu / EPUB placed in INBOX becomes a Zotero item with the file
-attached, tagged TAG and filed into one of COLLECTIONS by topic. Metadata
-come from Crossref when a DOI on the first pages checks out against the text,
-otherwise from a headless `claude -p` call that reads the title pages (as
-text, or as images for scans without a text layer).
+attached, tagged TAG and filed into COLLECTION (or, if topics are configured,
+into the collection of its topic). Metadata come from Crossref when a DOI on
+the first pages checks out against the text, otherwise from a language model
+that reads the title pages: `claude -p` by default (as text, or as images for
+scans without a text layer), or any command given in ZAI_LLM_CMD (text only).
 
 Writes go through the endpoints of Zotero's browser connector on
 localhost:23119, which need no API key and therefore never pop an
@@ -18,6 +19,7 @@ Settings: the ZAI_* environment variables below; see README.md.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,12 +47,23 @@ env = os.environ.get
 INBOX = Path(env("ZAI_INBOX", Path.home() / "Downloads" / "to-zotero")).expanduser()
 FAILED = INBOX / "failed"
 DONE = INBOX / "processed"
-# topic -> collection name; a missing collection falls back to FALLBACK, then
-# to whatever collection is selected in the Zotero pane
-COLLECTIONS = {"math": env("ZAI_COLLECTION_MATH", "Inbox math"),
-               "nonfic": env("ZAI_COLLECTION_NONFIC", "Inbox nonfiction"),
-               "other": env("ZAI_COLLECTION_OTHER", "Inbox other")}
-FALLBACK = env("ZAI_COLLECTION_FALLBACK", "Inbox")
+# every item goes to COLLECTION unless topics are configured; a missing
+# collection leaves the item in whatever collection is selected in Zotero
+COLLECTION = env("ZAI_COLLECTION", "Inbox")
+
+
+def read_topics():
+    """ZAI_TOPIC_<NAME>=<collection> | <description for the model>"""
+    topics = {}
+    for key, value in sorted(os.environ.items()):
+        if key.startswith("ZAI_TOPIC_"):
+            coll, _, desc = value.partition("|")
+            topics[key[len("ZAI_TOPIC_"):].lower()] = (coll.strip(), desc.strip())
+    return topics
+
+
+TOPICS = read_topics()
+LLM_CMD = env("ZAI_LLM_CMD", "")  # empty: built-in claude backend
 TAG = env("ZAI_TAG", "auto-import")
 DUP_TAG = env("ZAI_DUP_TAG", "possible-duplicate")  # added when a likely twin exists
 MODEL = env("ZAI_MODEL", "haiku")
@@ -88,18 +101,18 @@ FIELDS = {  # Zotero fields the model may fill, per item type
 }
 CREATOR_TYPES = {"author", "editor", "translator", "contributor", "bookAuthor"}
 
-TOPICS = """\
-- topic: "math" for mathematics, mathematical physics, theoretical CS; "nonfic" \
-for non-fiction outside mathematics (history, philosophy, psychoanalysis, \
-popular science, essays, memoirs); "other" for fiction, poetry and everything else."""
+
+
+def topics_rule():
+    return "- topic: one of\n" + "\n".join(
+        f'  "{name}": {desc or coll}' for name, (coll, desc) in TOPICS.items())
 
 PROMPT = """You are cataloguing a file for a Zotero library. Below are the first \
 and last pages of the document{how}. The original file name was: {name}
 
 Return ONLY a JSON object, no prose, no code fence:
 {{"itemType": one of {types},
-  "topic": "math" | "nonfic" | "other",
-  "title": "...",
+{topic_field}  "title": "...",
   "creators": [{{"lastName": "...", "firstName": "...", "creatorType": "author|editor|translator"}}],
   ...other fields from this list that the pages actually state: {fields}}}
 
@@ -123,8 +136,7 @@ transliterate: a name printed in Cyrillic stays in Cyrillic.
 - An article from a journal (e.g. Математический сборник, Известия РАН, ТМФ, \
 from mathnet.ru) is journalArticle; include publicationTitle, volume, issue, pages \
 and DOI when printed.
-{topics}
-- Omit any field you cannot read from the pages. Never guess an ISBN or DOI.
+{topics}- Omit any field you cannot read from the pages. Never guess an ISBN or DOI.
 - If the document cannot be identified at all, return {{"error": "why"}}.
 
 --- PAGES ---
@@ -259,50 +271,70 @@ def crossref(doi, first_text):
 
 # ---------------------------------------------------------------- the model
 
+def llm(prompt, images=()):
+    """The model's reply as text. Images are read only by the built-in claude backend."""
+    with tempfile.TemporaryDirectory(prefix="zai-") as empty:  # nothing for an agent to explore
+        if LLM_CMD:
+            if images:
+                raise RuntimeError("no text layer; reading page images needs the claude backend")
+            cmd = shlex.split(LLM_CMD)
+            stdin = prompt
+            if "{prompt}" in cmd:
+                cmd = [prompt if a == "{prompt}" else a for a in cmd]
+                stdin = None
+            r = subprocess.run(cmd, input=stdin, capture_output=True, text=True,
+                               timeout=300, cwd=empty)
+            if r.returncode:
+                raise RuntimeError(f"{cmd[0]} failed: {(r.stderr or r.stdout)[:300]}")
+            return r.stdout
+        cmd = [tool("claude"), "-p", "--model", MODEL, "--output-format", "json",
+               "--strict-mcp-config", "--no-session-persistence"]
+        if images:
+            cmd += ["--allowedTools", "Read", "--add-dir", str(images[0].parent)]
+        else:
+            cmd += ["--tools", ""]
+        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=300,
+                           cwd=images[0].parent if images else empty)
+        try:
+            out = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"claude failed: {(r.stderr or r.stdout)[:300]}")
+        if out.get("is_error"):
+            raise RuntimeError(f"claude: {out.get('result', '')[:300]}")
+        log(f"  claude: ${out.get('total_cost_usd', 0):.3f}")
+        return out.get("result", "")
+
+
 def ask_topic(item):
     """One short call for items whose metadata came from Crossref."""
     desc = json.dumps({k: item.get(k) for k in ("itemType", "title", "publicationTitle",
                        "bookTitle", "proceedingsTitle")}, ensure_ascii=False)
-    prompt = f"Classify this bibliographic item.\n{TOPICS}\n\nItem: {desc}\n\nReply with the topic word only."
-    r = subprocess.run([tool("claude"), "-p", "--model", MODEL, "--tools", "", "--strict-mcp-config",
-                        "--no-session-persistence"], input=prompt, capture_output=True,
-                       text=True, timeout=120, cwd=tempfile.gettempdir())
-    m = re.search(r"\b(math|nonfic|other)\b", r.stdout)
-    return m.group(1) if m else "math"
+    prompt = (f"Classify this bibliographic item.\n{topics_rule()}\n\nItem: {desc}\n\n"
+              "Reply with the topic name only.")
+    reply = llm(prompt).lower()
+    return next((t for t in TOPICS if re.search(rf"\b{re.escape(t)}\b", reply)), None)
 
 
-def ask_claude(name, text, images):
+def ask_metadata(name, text, images):
     how = ""
     if images:
         how = (" — it is a scan without a text layer, so the pages are given as images; "
                "read each of these files with the Read tool: " + ", ".join(map(str, images)))
+    names = " | ".join(f'"{t}"' for t in TOPICS)
     prompt = PROMPT.format(name=name, text=text or "(see images)", how=how,
                            types=" | ".join(FIELDS),
                            fields=", ".join(sorted({f for v in FIELDS.values() for f in v})),
-                           topics=TOPICS)
-    cmd = [tool("claude"), "-p", "--model", MODEL, "--output-format", "json",
-           "--strict-mcp-config", "--no-session-persistence"]
-    if images:
-        cmd += ["--allowedTools", "Read", "--add-dir", str(images[0].parent)]
-    else:
-        cmd += ["--tools", ""]
-    cwd = images[0].parent if images else tempfile.gettempdir()
-    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                       timeout=300, cwd=cwd)
-    try:
-        out = json.loads(r.stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"claude failed: {(r.stderr or r.stdout)[:300]}")
-    if out.get("is_error"):
-        raise RuntimeError(f"claude: {out.get('result', '')[:300]}")
-    res = out.get("result", "")
+                           topic_field=f'  "topic": {names},\n' if TOPICS else "",
+                           topics=topics_rule() + "\n" if TOPICS else "")
+    res = llm(prompt, images)
     m = re.search(r"\{.*\}", res, re.S)
     if not m:
         raise RuntimeError(f"no JSON in model reply: {res[:200]}")
     data = json.loads(m.group(0))
-    if not isinstance(data, dict) or "error" in data:
+    if not isinstance(data, dict):
+        raise RuntimeError(f"unexpected model reply: {res[:200]}")
+    if "error" in data:
         raise RuntimeError(f"model could not identify the file: {data['error']}")
-    log(f"  claude: ${out.get('total_cost_usd', 0):.3f}")
     return data
 
 
@@ -311,7 +343,7 @@ def ask_claude(name, text, images):
 def clean(item):
     kind = item.get("itemType") if item.get("itemType") in FIELDS else "book"
     out = {"itemType": kind,
-           "topic": item.get("topic") if item.get("topic") in COLLECTIONS else None}
+           "topic": item.get("topic") if item.get("topic") in TOPICS else None}
     for f in FIELDS[kind]:
         v = item.get(f)
         if v not in (None, "", []):
@@ -384,7 +416,7 @@ def find_duplicate(item):
 def save(item, path, topic, tags):
     sel = zpost("getSelectedCollection", {})
     ids = {t["name"]: t["id"] for t in sel["targets"]}
-    name = COLLECTIONS[topic] if COLLECTIONS[topic] in ids else FALLBACK
+    name = TOPICS[topic][0] if topic in TOPICS and TOPICS[topic][0] in ids else COLLECTION
     target = ids.get(name)
     sid = f"autoimport-{time.time_ns()}"
     zitem = dict(item, id="it", attachments=[], notes=[])
@@ -407,7 +439,7 @@ def save(item, path, topic, tags):
 
 def metadata(path):
     if path.suffix == ".epub":
-        return clean(ask_claude(path.name, epub_text(path), []))
+        return clean(ask_metadata(path.name, epub_text(path), []))
     n = page_count(path)
     if not n:
         raise RuntimeError("cannot read page count")
@@ -422,14 +454,14 @@ def metadata(path):
                 return clean(item)
     body = "\n".join(f"[page {p} of {n}]\n{texts[p]}" for p in head + tail)
     if len(re.sub(r"\s", "", body)) >= MIN_TEXT:
-        return clean(ask_claude(path.name, body[:40000], []))
+        return clean(ask_metadata(path.name, body[:40000], []))
     with tempfile.TemporaryDirectory(prefix="zai-") as tmp:
         imgs = [page_image(path, p, tmp) for p in head + tail]
         imgs = [i for i in imgs if i.exists()]
         if not imgs:
             raise RuntimeError("no text layer and page rendering failed")
         log(f"  no text layer, reading {len(imgs)} page images")
-        return clean(ask_claude(path.name, "", imgs))
+        return clean(ask_metadata(path.name, "", imgs))
 
 
 def move_to(path, folder):
@@ -443,7 +475,7 @@ def move_to(path, folder):
 def process(path):
     log(f"{path.name}")
     item = metadata(path)
-    topic = item.pop("topic") or ask_topic(item)
+    topic = item.pop("topic") or (ask_topic(item) if TOPICS else None)
     who = ", ".join(c["lastName"] for c in item["creators"][:3])
     label = f"{who} — {item['title']}" if who else item["title"]
     if item.get("volume") and item["itemType"] == "book":
