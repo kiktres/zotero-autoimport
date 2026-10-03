@@ -2,8 +2,9 @@
 
 A drop folder for Zotero on macOS. Put a PDF, DjVu or EPUB into
 `~/Downloads/to-zotero`. A few seconds later it is a Zotero item with correct
-metadata and the file attached, tagged `auto-import`, filed into a collection
-by topic. A macOS notification tells you what was added.
+metadata and the file attached, tagged `auto-import`, filed into one
+collection (or, optionally, into a collection per topic). A macOS
+notification tells you what was added.
 
 It is meant for files the Zotero browser connector cannot save: books from
 shadow libraries, scans without a text layer, articles from sites with no
@@ -17,23 +18,24 @@ For each file:
 1. **DOI.** A DOI on the first two pages is looked up in Crossref. The record
    is accepted only if at least 60% of the words of its title (words longer
    than 3 letters) occur on those pages; this rejects DOIs of cited works.
-2. **Otherwise, a model reads the document.** The first 4 and the last 3
-   pages go to `claude -p` (Claude Code in non-interactive mode, model
-   `haiku` by default). It returns Zotero fields: item type, creators, title,
-   publisher, place, year, ISBN, journal, volume, pages. For scans without a
-   text layer the pages are rendered to images and read as images; for EPUB
-   the OPF metadata and the first chapters are used. The prompt asks for
-   names and titles in the script of the document and for the imprint data
-   of the edition at hand, not of the original.
-3. **Topic.** The same call returns a topic, `math`, `nonfic` or `other`,
-   which picks the collection.
+2. **Otherwise, a model reads the document.** The text of the first 4 and the
+   last 3 pages goes to a language model (see [Model](#model)). It returns
+   Zotero fields: item type, creators, title, volume, publisher, place, year,
+   ISBN, journal, pages. For EPUB the OPF metadata and the first chapters are
+   used. The prompt asks for names and titles in the script of the document
+   and for the imprint data of the edition at hand, not of the original.
+   OCR'd scans go this way like any PDF; a scan without a text layer is
+   rendered to images, which only the Claude backend can read.
+3. **Topic** (only if topics are configured). The same call returns one of
+   your topics, which picks the collection.
 
 If the library already has an item with the same title, volume and (when
 both are known) year, the file is still imported, with an extra tag
 `possible-duplicate`; Zotero's *Duplicate Items* view merges the two if they
 really are the same.
 
-Cost: one model call per file without a usable DOI, typically $0.04–0.07.
+Cost with the default backend: one call per file without a usable DOI,
+typically $0.02–0.07.
 
 ## What happens to the file
 
@@ -49,7 +51,8 @@ Every run is logged to `~/Library/Logs/zotero-autoimport.log`.
 - macOS, Zotero 7 or later, running (the importer talks to it on
   `localhost:23119`; if Zotero is closed, files wait in the folder).
 - Python 3.9+, standard library only.
-- [Claude Code](https://claude.com/claude-code), logged in (`claude` on PATH).
+- A model CLI: [Claude Code](https://claude.com/claude-code) (`claude`, the
+  default) or another one, see [Model](#model).
 - Poppler: `brew install poppler`. For DjVu also `brew install djvulibre`.
 
 ## Install
@@ -79,18 +82,44 @@ time, so pass it to `install.sh` instead.
 | variable | default | meaning |
 |---|---|---|
 | `ZAI_INBOX` | `~/Downloads/to-zotero` | drop folder |
-| `ZAI_COLLECTION_MATH` | `Inbox math` | collection for topic `math` |
-| `ZAI_COLLECTION_NONFIC` | `Inbox nonfiction` | collection for topic `nonfic` |
-| `ZAI_COLLECTION_OTHER` | `Inbox other` | collection for topic `other` |
-| `ZAI_COLLECTION_FALLBACK` | `Inbox` | used if the topic's collection does not exist |
+| `ZAI_COLLECTION` | `Inbox` | collection for imported items |
+| `ZAI_TOPIC_<name>` | none | optional topic, see below |
 | `ZAI_TAG` | `auto-import` | tag put on every imported item |
 | `ZAI_DUP_TAG` | `possible-duplicate` | extra tag when a likely twin exists |
-| `ZAI_MODEL` | `haiku` | model passed to `claude -p --model` |
+| `ZAI_LLM_CMD` | empty | model command, see [Model](#model) |
+| `ZAI_MODEL` | `haiku` | model for the default `claude` backend |
 | `ZAI_CROSSREF_MAILTO` | empty | your e-mail for Crossref's polite pool |
 
-Collections are matched by name. If neither the topic's collection nor the
-fallback exists, the item lands in the collection currently selected in
-Zotero.
+Collections are matched by name; create them in Zotero first. If a collection
+does not exist, the item lands in the one currently selected in Zotero.
+
+**Topics.** To split imports by subject, add one line per topic:
+
+```sh
+ZAI_TOPIC_MATH=Inbox math | mathematics, mathematical physics, theoretical CS
+ZAI_TOPIC_NONFIC=Inbox nonfiction | history, philosophy, essays
+```
+
+The part before `|` is the collection, the part after it tells the model what
+belongs there. An item that fits no topic goes to `ZAI_COLLECTION`.
+
+## Model
+
+By default the importer calls `claude -p --model haiku`, which needs Claude
+Code installed and logged in. To use another model, set `ZAI_LLM_CMD` to a
+command that prints the model's reply. `{prompt}` in the command is replaced
+by the prompt; without it, the prompt is sent on stdin.
+
+```sh
+ZAI_LLM_CMD=agy -p {prompt}                 # Antigravity CLI
+ZAI_LLM_CMD=copilot -s -p {prompt}          # GitHub Copilot CLI
+ZAI_LLM_CMD=ollama run qwen2.5:14b          # local model via Ollama
+```
+
+The first two were checked against `claude` on the same Russian book and
+returned the same record. The reply must contain one JSON object; anything
+around it is ignored. These backends receive text only, so a scan without a
+text layer fails with a message instead of being imported.
 
 ## How it writes to Zotero
 
@@ -102,6 +131,8 @@ are not a documented public API and may change between Zotero versions.
 
 ## Limitations
 
+- Small local models handle the text case less reliably than hosted ones,
+  especially with non-English imprints.
 - The model sees 7 pages. If the imprint is elsewhere (common in scans), the
   year or publisher stays empty.
 - Model output can be wrong in details: swapped first and last names, year of
