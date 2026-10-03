@@ -68,8 +68,11 @@ with `./zotero_autoimport.py file.pdf` (the file is then left where it is).
 
 ## Settings
 
-Environment variables; for the launchd agent add them to the
-`EnvironmentVariables` block of the plist and rerun `install.sh`.
+Put them in `config.env` next to the script (copy `config.env.example`; the
+file is ignored by git), or set them in the environment, which takes
+precedence. The script reads `config.env` on every run, so no reinstall is
+needed. `ZAI_INBOX` is the exception: the watched folder is fixed at install
+time, so pass it to `install.sh` instead.
 
 | variable | default | meaning |
 |---|---|---|

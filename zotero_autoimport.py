@@ -29,6 +29,18 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+
+def load_config(path):
+    """KEY=VALUE lines from a local, untracked file; the real environment wins."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        key, sep, value = line.partition("=")
+        if sep and not line.lstrip().startswith("#"):
+            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+load_config(Path(__file__).resolve().parent / "config.env")
 env = os.environ.get
 INBOX = Path(env("ZAI_INBOX", Path.home() / "Downloads" / "to-zotero")).expanduser()
 FAILED = INBOX / "failed"
