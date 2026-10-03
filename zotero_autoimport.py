@@ -44,7 +44,6 @@ load_config(Path(__file__).resolve().parent / "config.env")
 env = os.environ.get
 INBOX = Path(env("ZAI_INBOX", Path.home() / "Downloads" / "to-zotero")).expanduser()
 FAILED = INBOX / "failed"
-DUPS = INBOX / "duplicates"
 DONE = INBOX / "processed"
 # topic -> collection name; a missing collection falls back to FALLBACK, then
 # to whatever collection is selected in the Zotero pane
@@ -53,6 +52,7 @@ COLLECTIONS = {"math": env("ZAI_COLLECTION_MATH", "Inbox math"),
                "other": env("ZAI_COLLECTION_OTHER", "Inbox other")}
 FALLBACK = env("ZAI_COLLECTION_FALLBACK", "Inbox")
 TAG = env("ZAI_TAG", "auto-import")
+DUP_TAG = env("ZAI_DUP_TAG", "possible-duplicate")  # added when a likely twin exists
 MODEL = env("ZAI_MODEL", "haiku")
 MAILTO = env("ZAI_CROSSREF_MAILTO", "")  # Crossref's "polite pool", optional
 LOG = Path.home() / "Library" / "Logs" / "zotero-autoimport.log"
@@ -381,7 +381,7 @@ def find_duplicate(item):
     return None
 
 
-def save(item, path, topic):
+def save(item, path, topic, tags):
     sel = zpost("getSelectedCollection", {})
     ids = {t["name"]: t["id"] for t in sel["targets"]}
     name = COLLECTIONS[topic] if COLLECTIONS[topic] in ids else FALLBACK
@@ -390,7 +390,7 @@ def save(item, path, topic):
     zitem = dict(item, id="it", attachments=[], notes=[])
     zpost("saveItems", {"sessionID": sid, "uri": "file:///", "items": [zitem]})
     # tags given in saveItems are dropped; the session's own tags stick
-    session = {"sessionID": sid, "tags": TAG}
+    session = {"sessionID": sid, "tags": ", ".join(tags)}
     if target:
         session["target"] = target
     else:
@@ -446,17 +446,13 @@ def process(path):
     topic = item.pop("topic") or ask_topic(item)
     who = ", ".join(c["lastName"] for c in item["creators"][:3])
     label = f"{who} — {item['title']}" if who else item["title"]
-    if item.get("volume"):
+    if item.get("volume") and item["itemType"] == "book":
         label += f", vol. {item['volume']}"
     dup = find_duplicate(item)
-    if dup:
-        log(f"  duplicate of {dup}, skipped")
-        notify("Zotero: already there", label)
-        return "dup"
-    where = save(item, path, topic)
-    log(f"  saved to '{where}': {item['itemType']}: {label} ({item.get('date', '?')})")
-    notify(f"Zotero → {where}", label)
-    return "ok"
+    where = save(item, path, topic, [TAG, DUP_TAG] if dup else [TAG])
+    log(f"  saved to '{where}': {item['itemType']}: {label} ({item.get('date', '?')})"
+        + (f"; possible duplicate of {dup}" if dup else ""))
+    notify(f"Zotero → {where}" + (" (possible duplicate)" if dup else ""), label)
 
 
 def ready(path):
@@ -485,9 +481,9 @@ def main(args):
         if not path:
             continue
         try:
-            status = process(path)
+            process(path)
             if not explicit:
-                move_to(path, DUPS if status == "dup" else DONE)
+                move_to(path, DONE)
         except Exception as e:
             log(f"  FAILED: {e}")
             notify("Zotero: import failed", f"{path.name}: {e}"[:200])
