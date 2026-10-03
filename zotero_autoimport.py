@@ -71,8 +71,8 @@ HEAD_PAGES, TAIL_PAGES = 4, 3
 MIN_TEXT = 300  # fewer non-space chars than this on the sampled pages = scan
 
 FIELDS = {  # Zotero fields the model may fill, per item type
-    "book": ["title", "date", "publisher", "place", "ISBN", "edition", "series",
-             "seriesNumber", "numPages", "language"],
+    "book": ["title", "volume", "numberOfVolumes", "date", "publisher", "place", "ISBN",
+             "edition", "series", "seriesNumber", "numPages", "language"],
     "bookSection": ["title", "bookTitle", "date", "publisher", "place", "ISBN",
                     "pages", "language"],
     "journalArticle": ["title", "publicationTitle", "journalAbbreviation", "date",
@@ -111,6 +111,11 @@ on the title page. Russian names: lastName = фамилия, firstName = имя 
 back of the title page or on the last page): publisher, city, year, ISBN, page count. \
 Use them.
 - date = the year (or full date) of this edition, not of the original.
+- One volume of a multi-volume work: volume = its number in arabic digits \
+("Том III", "Vol. 3", "Книга третья" -> "3"); keep the volume designation out of \
+the title. Give numberOfVolumes if printed.
+- A title printed in capitals is written in normal case ("КАПИТАЛ. КРИТИКА" -> \
+"Капитал. Критика").
 - Describe the document you are holding. For a translation, give the journal or \
 book it appears in, its publisher and year; details of the original (often in a \
 footnote: "first published in ...", "перевод по изданию ...") go nowhere. Never \
@@ -338,8 +343,24 @@ def zotero_up():
         return False
 
 
-def find_duplicate(title):
-    q = urllib.parse.urlencode({"q": title, "itemType": "-attachment", "limit": 10,
+ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7, "viii": 8,
+         "ix": 9, "x": 10}
+
+
+def volume_key(v):
+    v = str(v or "").strip().lower()
+    return str(ROMAN.get(v, v))
+
+
+def year(date):
+    m = re.search(r"\b(1[5-9]|20)\d\d\b", str(date or ""))
+    return m.group(0) if m else None
+
+
+def find_duplicate(item):
+    """Key of an item with the same title, volume and (if both are known) year."""
+    title = item["title"]
+    q = urllib.parse.urlencode({"q": title, "itemType": "-attachment", "limit": 25,
                                 "format": "json"})
     try:
         with urllib.request.urlopen(f"{ZOTERO}/api/users/0/items?{q}", timeout=20) as r:
@@ -348,8 +369,15 @@ def find_duplicate(title):
         return None
     norm = lambda s: re.sub(r"\W+", " ", s).strip().lower()
     for it in items:
-        if norm(it["data"].get("title", "")) == norm(title):
-            return it["key"]
+        d = it["data"]
+        if norm(d.get("title", "")) != norm(title):
+            continue
+        if volume_key(d.get("volume")) != volume_key(item.get("volume")):
+            continue
+        y1, y2 = year(d.get("date")), year(item.get("date"))
+        if y1 and y2 and y1 != y2:
+            continue
+        return it["key"]
     return None
 
 
@@ -418,7 +446,9 @@ def process(path):
     topic = item.pop("topic") or ask_topic(item)
     who = ", ".join(c["lastName"] for c in item["creators"][:3])
     label = f"{who} — {item['title']}" if who else item["title"]
-    dup = find_duplicate(item["title"])
+    if item.get("volume"):
+        label += f", vol. {item['volume']}"
+    dup = find_duplicate(item)
     if dup:
         log(f"  duplicate of {dup}, skipped")
         notify("Zotero: already there", label)
