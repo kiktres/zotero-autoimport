@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PYTHON@</string>
+    <string>@SCRIPT@</string>
+  </array>
+  <key>WatchPaths</key>
+  <array><string>@INBOX@</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@PATH@</string>
+    <key>ZAI_INBOX</key><string>@INBOX@</string>
+  </dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/zotero-autoimport.launchd.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/zotero-autoimport.launchd.log</string>
+</dict>
+</plist>
