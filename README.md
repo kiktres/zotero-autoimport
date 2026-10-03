@@ -1,15 +1,20 @@
 # zotero-autoimport
 
-A drop folder for Zotero on macOS. Put a PDF, DjVu or EPUB into
-`~/Downloads/to-zotero`. A few seconds later it is a Zotero item with correct
-metadata and the file attached, tagged `auto-import`, filed into one
-collection (or, optionally, into a collection per topic). A macOS
-notification tells you what was added.
+Bibliographic metadata for bare files. Drop a PDF, DjVu or EPUB into a
+folder; the importer works out what it is — authors, title, publisher, year,
+volume, ISBN or journal and DOI — and creates a Zotero item with these fields
+and the file attached. It reads the metadata from the document itself: from
+Crossref when the first pages carry a DOI, otherwise by giving the title
+pages and the imprint to a language model.
 
-It is meant for files the Zotero browser connector cannot save: books from
-shadow libraries, scans without a text layer, articles from sites with no
-Zotero translator (e.g. mathnet.ru), Russian-language books whose ISBNs are
-missing from the usual catalogues.
+This covers files that Zotero's own "Retrieve Metadata" and browser connector
+cannot identify: books from shadow libraries, OCR'd scans, articles from sites
+with no Zotero translator (e.g. mathnet.ru), Russian-language books whose
+ISBNs are missing from the usual catalogues.
+
+It runs on macOS as a watched folder (`~/Downloads/to-zotero` by default).
+Imported items are tagged `auto-import` and filed into one collection (or one
+per topic); a notification says what was added.
 
 ## How metadata are found
 
@@ -113,11 +118,12 @@ by the prompt; without it, the prompt is sent on stdin.
 ```sh
 ZAI_LLM_CMD=agy -p {prompt}                 # Antigravity CLI
 ZAI_LLM_CMD=copilot -s -p {prompt}          # GitHub Copilot CLI
+ZAI_LLM_CMD=codex exec --skip-git-repo-check {prompt}   # OpenAI Codex CLI
 ZAI_LLM_CMD=ollama run qwen2.5:14b          # local model via Ollama
 ```
 
-The first two were checked against `claude` on the same Russian book and
-returned the same record. The reply must contain one JSON object; anything
+`agy` and `copilot` were checked against `claude` on the same Russian book
+and returned the same record; the Codex and Ollama lines are untested. The reply must contain one JSON object; anything
 around it is ignored. These backends receive text only, so a scan without a
 text layer fails with a message instead of being imported.
 
