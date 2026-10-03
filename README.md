@@ -53,7 +53,7 @@ Every run is logged to `~/Library/Logs/zotero-autoimport.log`.
 ## Install
 
 ```sh
-git clone https://github.com/<you>/zotero-autoimport
+git clone https://github.com/kiktres/zotero-autoimport
 cd zotero-autoimport
 ./install.sh                  # or ./install.sh /path/to/another/folder
 ```
