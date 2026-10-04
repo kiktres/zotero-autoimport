@@ -116,14 +116,21 @@ command that prints the model's reply. `{prompt}` in the command is replaced
 by the prompt; without it, the prompt is sent on stdin.
 
 ```sh
-ZAI_LLM_CMD=agy -p {prompt}                 # Antigravity CLI
+ZAI_LLM_CMD=agy --model gemini-3.8-flash-low -p {prompt}   # Antigravity CLI
 ZAI_LLM_CMD=copilot -s -p {prompt}          # GitHub Copilot CLI
 ZAI_LLM_CMD=codex exec --skip-git-repo-check {prompt}   # OpenAI Codex CLI
 ZAI_LLM_CMD=ollama run qwen2.5:14b          # local model via Ollama
 ```
 
 `agy` and `copilot` were checked against `claude` on the same Russian book
-and returned the same record; the Codex and Ollama lines are untested. The reply must contain one JSON object; anything
+and returned the same record; the Codex and Ollama lines are untested.
+
+**Pin a small model.** The task is extraction from a few pages; a small model
+does it as well as a large one. The default `claude` backend passes
+`--model haiku` (the run reports `claude-haiku-4-5`). Other CLIs use their own
+default unless told otherwise — for `agy` that is Gemini Flash (High), for
+Copilot it depends on your plan — so give their `--model` flag a small model
+your account offers (`agy models` lists them). The reply must contain one JSON object; anything
 around it is ignored. These backends receive text only, so a scan without a
 text layer fails with a message instead of being imported.
 
