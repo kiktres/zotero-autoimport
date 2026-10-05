@@ -124,6 +124,8 @@ on the title page. Russian names: lastName = фамилия, firstName = имя 
 back of the title page or on the last page): publisher, city, year, ISBN, page count. \
 Use them.
 - date = the year (or full date) of this edition, not of the original.
+- numPages only when a page count is printed in the book (e.g. "288 с.", \
+"xii+288 pp."); never count pages of the file, scans and PDFs rarely match the edition.
 - One volume of a multi-volume work: volume = its number in arabic digits \
 ("Том III", "Vol. 3", "Книга третья" -> "3"); keep the volume designation out of \
 the title. Give numberOfVolumes if printed.
@@ -183,8 +185,8 @@ def page_text(path, p):
     return r.stdout
 
 
-def page_image(path, p, tmp):
-    out = Path(tmp) / f"page-{p:05d}"
+def page_image(path, p, tmp, label):
+    out = Path(tmp) / label
     if path.suffix == ".pdf":
         run(tool("pdftoppm"), "-f", str(p), "-l", str(p), "-r", "110", "-gray",
             "-png", "-singlefile", str(path), str(out))
@@ -452,11 +454,14 @@ def metadata(path):
             if item:
                 log(f"  metadata from Crossref ({doi})")
                 return clean(item)
-    body = "\n".join(f"[page {p} of {n}]\n{texts[p]}" for p in head + tail)
+    # no PDF page numbers here: the model would report the file's length as numPages
+    body = "\n".join([f"[page {i} from the start]\n{texts[p]}" for i, p in enumerate(head, 1)]
+                     + [f"[page {n - p + 1} from the end]\n{texts[p]}" for p in tail])
     if len(re.sub(r"\s", "", body)) >= MIN_TEXT:
         return clean(ask_metadata(path.name, body[:40000], []))
     with tempfile.TemporaryDirectory(prefix="zai-") as tmp:
-        imgs = [page_image(path, p, tmp) for p in head + tail]
+        imgs = ([page_image(path, p, tmp, f"start-{i}") for i, p in enumerate(head, 1)]
+                + [page_image(path, p, tmp, f"end-{n - p + 1}") for p in tail])
         imgs = [i for i in imgs if i.exists()]
         if not imgs:
             raise RuntimeError("no text layer and page rendering failed")
