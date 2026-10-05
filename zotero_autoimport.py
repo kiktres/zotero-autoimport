@@ -16,6 +16,7 @@ Usage: zotero_autoimport.py [FILE ...]   (no arguments: process INBOX)
 Settings: the ZAI_* environment variables below; see README.md.
 """
 
+import html
 import json
 import os
 import re
@@ -80,7 +81,7 @@ def tool(name):
 
 EXTS = {".pdf": "application/pdf", ".djvu": "image/vnd.djvu",
         ".djv": "image/vnd.djvu", ".epub": "application/epub+zip"}
-HEAD_PAGES, TAIL_PAGES = 4, 3
+HEAD_PAGES, TAIL_PAGES = 6, 3
 MIN_TEXT = 300  # fewer non-space chars than this on the sampled pages = scan
 
 FIELDS = {  # Zotero fields the model may fill, per item type
@@ -99,7 +100,15 @@ FIELDS = {  # Zotero fields the model may fill, per item type
     "preprint": ["title", "repository", "archiveID", "date", "DOI", "language"],
     "manuscript": ["title", "place", "date", "numPages", "language"],
 }
-CREATOR_TYPES = {"author", "editor", "translator", "contributor", "bookAuthor"}
+for _f in FIELDS.values():  # every type may carry these
+    _f += ["abstractNote", "originalDate"]
+CREATOR_TYPES = {"author", "editor", "translator", "bookAuthor"}
+LANGUAGES = {"russian": "ru", "русский": "ru", "rus": "ru", "english": "en",
+             "английский": "en", "eng": "en", "french": "fr", "français": "fr",
+             "французский": "fr", "fre": "fr", "fra": "fr", "german": "de", "deutsch": "de",
+             "немецкий": "de", "ger": "de", "deu": "de", "ukrainian": "uk",
+             "украинский": "uk", "ukr": "uk", "italian": "it", "итальянский": "it",
+             "ita": "it", "spanish": "es", "испанский": "es", "spa": "es"}
 
 
 
@@ -120,10 +129,29 @@ Rules.
 - Copy title and names in the language and script of the document itself, as printed \
 on the title page. Russian names: lastName = фамилия, firstName = имя and отчество \
 (or initials, exactly as printed).
+- creators: authors, editors (под редакцией, составитель, ответственный редактор) \
+and translators only. Never artists, proofreaders, typesetters, technical or \
+managing editors and the like listed in the imprint.
 - Books printed in Russia carry full imprint data (выходные данные, often on the \
 back of the title page or on the last page): publisher, city, year, ISBN, page count. \
 Use them.
-- date = the year (or full date) of this edition, not of the original.
+- date = the year of this edition as printed on the title page or in the imprint \
+line ("М.: Эксмо, 2022"); only if there is none, the year of "подписано в печать". \
+Not the year of the original.
+- publisher = the publisher's name only: no city, no quotes, no generic word \
+before a name in quotes (Издательство «Эксмо» -> Эксмо; but Издательство \
+Московского университета stays as it is, the word is part of that name).
+- language = two-letter ISO 639-1 code: ru, en, fr, de.
+- ISBN: only an ISBN of this book, printed on the back of the title page or in the \
+imprint. The last pages often advertise other books with their ISBNs; ignore those \
+pages entirely. One volume of a set: the ISBN of the volume, not of the set.
+- abstractNote: an abstract or annotation printed in the document (abstract of an \
+article, аннотация on the back of a Russian title page), copied verbatim in its \
+original language. Never write a summary yourself; omit if none is printed.
+- originalDate: for a translation or a reissue of an older work, the year the \
+work was first published — as printed ("перевод с издания 1890 г."), or, for a \
+well-known work, from your own knowledge if you are certain (Marx, Das Kapital, \
+vol. 1 -> 1867). Omit otherwise.
 - numPages only when a page count is printed in the book (e.g. "288 с.", \
 "xii+288 pp."); never count pages of the file, scans and PDFs rarely match the edition.
 - One volume of a multi-volume work: volume = its number in arabic digits \
@@ -133,8 +161,12 @@ the title. Give numberOfVolumes if printed.
 "Капитал. Критика").
 - Describe the document you are holding. For a translation, give the journal or \
 book it appears in, its publisher and year; details of the original (often in a \
-footnote: "first published in ...", "перевод по изданию ...") go nowhere. Never \
-transliterate: a name printed in Cyrillic stays in Cyrillic.
+footnote: "first published in ...", "перевод по изданию ...") go only into \
+originalDate. Never transliterate: a name printed in Cyrillic stays in Cyrillic.
+- The file name and EPUB metadata (OPF) are hints, often wrong: shadow libraries \
+put their site names there, and OPF dates are usually the date the file was made. \
+When they disagree with the text, trust the text; never take a website as \
+publisher or part of a title.
 - An article from a journal (e.g. Математический сборник, Известия РАН, ТМФ, \
 from mathnet.ru) is journalArticle; include publicationTitle, volume, issue, pages \
 and DOI when printed.
@@ -253,7 +285,7 @@ def crossref(doi, first_text):
         "date": "-".join(f"{x:02d}" if i else str(x) for i, x in enumerate(parts[0])),
         "volume": m.get("volume"), "issue": m.get("issue"), "pages": m.get("page"),
         "publisher": m.get("publisher") if kind in ("book", "bookSection", "conferencePaper") else None,
-        "language": m.get("language"),
+        "language": m.get("language"), "abstractNote": m.get("abstract"),
         "creators": [{"lastName": a.get("family", a.get("name", "")),
                       "firstName": a.get("given", ""), "creatorType": role}
                      for role in ("author", "editor") for a in m.get(role, [])],
@@ -342,6 +374,32 @@ def ask_metadata(name, text, images):
 
 # ---------------------------------------------------------------- Zotero
 
+TAG_RE = re.compile(r"</?[A-Za-z][\w:.-]*(\s[^<>]*)?/?>")  # <i>, </jats:p>, <mml:mi ...>
+BLOCK_RE = re.compile(r"</?(?:\w+:)?(?:p|sec|div|br|li|list)\b[^<>]*>", re.I)
+HEADING_RE = re.compile(r"<(\w+:)?title\b[^<>]*>.*?</(\w+:)?title>", re.I | re.S)  # "Abstract"
+
+
+def text(v, sep="; "):
+    """A field value as plain text: lists joined, markup and entities removed."""
+    if isinstance(v, (list, tuple)):
+        v = sep.join(str(x) for x in v if x not in (None, ""))
+    v = BLOCK_RE.sub(" ", HEADING_RE.sub(" ", str(v)))
+    v = html.unescape(TAG_RE.sub("", v))
+    return re.sub(r"\s+", " ", v).strip()
+
+
+def language(v):
+    low = v.strip().lower()
+    if re.fullmatch(r"[a-z]{2}([-_]\w+)?", low):  # ru, ru-RU
+        return low[:2]
+    return LANGUAGES.get(low, v.strip())
+
+
+def publisher(v):
+    m = re.fullmatch(r"(?:издательство|изд-во|publishing house)\s*[«\"“](.+)[»\"”]", v, re.I)
+    return (m.group(1) if m else v).strip("«»\"“” ")
+
+
 def clean(item):
     kind = item.get("itemType") if item.get("itemType") in FIELDS else "book"
     out = {"itemType": kind,
@@ -349,13 +407,23 @@ def clean(item):
     for f in FIELDS[kind]:
         v = item.get(f)
         if v not in (None, "", []):
-            out[f] = str(v).strip()
+            v = text(v, " " if f == "ISBN" else "; ")
+            if v:
+                out[f] = v
     if not out.get("title"):
         raise RuntimeError("no title")
+    if "language" in out:
+        out["language"] = language(out["language"])
+    if "publisher" in out:
+        out["publisher"] = publisher(out["publisher"])
+    if "originalDate" in out:  # Zotero has no such field; CSL and Better BibTeX read it from Extra
+        out["extra"] = f"original-date: {out.pop('originalDate')}"
     out["creators"] = [
-        {"lastName": c.get("lastName", "").strip(), "firstName": c.get("firstName", "").strip(),
-         "creatorType": c.get("creatorType") if c.get("creatorType") in CREATOR_TYPES else "author"}
-        for c in item.get("creators") or [] if c.get("lastName")]
+        {"lastName": text(c.get("lastName", "")), "firstName": text(c.get("firstName", "")),
+         "creatorType": c["creatorType"]}
+        for c in item.get("creators") or []
+        if c.get("lastName") and c.get("creatorType", "author") in CREATOR_TYPES
+        for c in [dict(c, creatorType=c.get("creatorType", "author"))]]
     return out
 
 
